@@ -16,12 +16,12 @@ class StepperMotor  : public Module {
         ~StepperMotor();
 
         // called from step ticker ISR
-        inline bool step() { step_pin.set(1); current_position_steps += (direction?-1:1); return moving; }
+        inline bool step() { step_pin.set(1); current_position_steps += (direction?-1:1); ++step_count; return moving; }
         // called from unstep ISR
         inline void unstep() { step_pin.set(0); }
         // called from step ticker ISR
         inline void set_direction(bool f) { dir_pin.set(f); direction= f; }
-
+        inline bool same_direction(bool f) { return direction==f; }
         inline void enable(bool state) { en_pin.set(!state); };
         inline bool is_enabled() const { return !en_pin.get(); };
         inline bool is_moving() const { return moving; };
@@ -32,7 +32,7 @@ class StepperMotor  : public Module {
 
         bool which_direction() const { return direction; }
 
-        float get_steps_per_second()  const { return steps_per_second; }
+        //float get_steps_per_second()  const { return steps_per_second; }
         float get_steps_per_mm()  const { return steps_per_mm; }
         void change_steps_per_mm(float);
         void change_last_milestone(float);
@@ -41,7 +41,15 @@ class StepperMotor  : public Module {
         float get_last_milestone(void) const { return last_milestone_mm; }
         int32_t get_last_milestone_steps(void) const { return last_milestone_steps; }
         float get_current_position(void) const { return (float)current_position_steps/steps_per_mm; }
-        uint32_t get_current_step(void) const { return current_position_steps; }
+        int32_t get_current_step(void) const { return current_position_steps; }
+        int64_t get_steps_per_tick(void) const { return steps_per_tick; }
+        void set_steps_per_tick( int64_t st ) { steps_per_tick= st; }
+        void update_steps_per_tick( int64_t ac ) { steps_per_tick+= ac; }
+        int64_t get_counter(void) const { return counter; }
+        void set_counter( int64_t c ) { counter= c; }
+        void update_counter(void) { counter+=steps_per_tick; }
+        uint32_t get_step_count(void) { return step_count; }
+        void clear_step_count(void) { step_count=0; }
         float get_max_rate(void) const { return max_rate; }
         void set_max_rate(float mr) { max_rate= mr; }
         void set_acceleration(float a) { acceleration= a; }
@@ -62,12 +70,15 @@ class StepperMotor  : public Module {
         Pin dir_pin;
         Pin en_pin;
 
-        float steps_per_second;
+        //float steps_per_second;
         float steps_per_mm;
         float max_rate; // this is not really rate it is in mm/sec, misnamed used in Robot and Extruder
         float acceleration;
 
         volatile int32_t current_position_steps;
+        volatile int64_t steps_per_tick; // 16.48 fixed point, aka current speed
+        volatile int64_t counter; // 16.48 fixed point, 0.0 .. 1.0 partial step
+        volatile uint32_t step_count;
         int32_t last_milestone_steps;
         float   last_milestone_mm;
 

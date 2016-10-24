@@ -67,12 +67,12 @@ void Block::clear()
     }
     for(auto &i : tick_info) {
         i.steps_per_tick= 0;
-        i.counter= 0;
+        //i.counter= 0;
         i.acceleration_change= 0;
         i.deceleration_change= 0;
         i.plateau_rate= 0;
         i.steps_to_move= 0;
-        i.step_count= 0;
+        //i.step_count= 0;
         i.next_accel_event= 0;
     }
 }
@@ -123,14 +123,14 @@ void Block::calculate_trapezoid( float entryspeed, float exitspeed )
 
     float initial_rate = this->nominal_rate * (entryspeed / this->nominal_speed); // steps/sec
     float final_rate = this->nominal_rate * (exitspeed / this->nominal_speed);
-    //printf("Initial rate: %f, final_rate: %f\n", initial_rate, final_rate);
+    //THEKERNEL->streams->printf("id %d: Steps: %lu, Dist: %fmm, Initial rate: %f, final_rate: %f\n", this->id, this->steps_event_count, this->millimeters, initial_rate, final_rate);
     // How many steps ( can be fractions of steps, we need very precise values ) to accelerate and decelerate
     // This is a simplification to get rid of rate_delta and get the steps/s² accel directly from the mm/s² accel
     float acceleration_per_second = (this->acceleration * this->steps_event_count) / this->millimeters;
 
     float maximum_possible_rate = sqrtf( ( this->steps_event_count * acceleration_per_second ) + ( ( powf(initial_rate, 2) + powf(final_rate, 2) ) / 2.0F ) );
 
-    //printf("id %d: acceleration_per_second: %f, maximum_possible_rate: %f steps/sec, %f mm/sec\n", this->id, acceleration_per_second, maximum_possible_rate, maximum_possible_rate/100);
+    //THEKERNEL->streams->printf("acceleration_per_second: %f, maximum_possible_rate: %f steps/sec, %f mm/sec\n", acceleration_per_second, maximum_possible_rate, maximum_possible_rate/314);
 
     // Now this is the maximum rate we'll achieve this move, either because
     // it's the higher we can achieve, or because it's the higher we are
@@ -188,6 +188,8 @@ void Block::calculate_trapezoid( float entryspeed, float exitspeed )
     float acceleration_in_steps = (acceleration_time > 0.0F ) ? ( this->maximum_rate - initial_rate ) / acceleration_time : 0;
     float deceleration_in_steps =  (deceleration_time > 0.0F ) ? ( this->maximum_rate - final_rate ) / deceleration_time : 0;
 
+    //THEKERNEL->streams->printf("Accel until %lu: Decel after: %lu\n", acceleration_ticks, total_move_ticks - deceleration_ticks);
+    
     // we have a potential race condition here as we could get interrupted anywhere in the middle of this call, we need to lock
     // the updates to the blocks to get around it
     this->locked= true;
@@ -294,20 +296,43 @@ float Block::max_exit_speed()
 
 // prepare block for the step ticker, called everytime the block changes
 // this is done during planning so does not delay tick generation and step ticker can simply grab the next block during the interrupt
+// Inputs:
+//   block->total_move_ticks        time this block should take
+//   bolck->steps_event_count       steps for the longest axis
+//   block->steps[m]                Step to move axis m
+//   block->initial_rate            mm/s float
+//   block->maximum_rate            mm/s float
+//   block->acceleration_per_tick   steps/(tick*tick) float
+//   block->deceleration_per_tick   steps/(tick*tick) float
+//   block->accelerate_until        ticks 0..total_move_ticks
+//   block->decelerate_after        ticks 0..total_move_ticks
+
+// Outputs:
+//   block->tick_info[m].steps_per_tick             initial rate 16.48 Fixed Point
+//   block->tick_info[m].next_accel_event           next accel event tick default to no change, never==total_move_ticks+1 
+//   block->tick_info[m].acceleration_change        initial acceleration in steps/(tick*tick) 16.48 Fixed Point
+//   block->tick_info[m].deceleration_change        steps/(tick*tick) 16.48 Fixed Point
+//   block->tick_info[m].plateau_rate               steps/tick used if there are any ticks between accelerate_until and decelerate_after16.48 Fixed Point
+
+// Macros and Constants:
+//  STEPTICKER_FPSCALE (1<<48)
+//  STEPTICKER_TOFP(x) ((int64_t)roundf((float)(x)*STEPTICKER_FPSCALE))
+
 void Block::prepare()
 {
+    THEKERNEL->streams->printf("id %d: TMT: %lu, AccelUntil: %lu, DecelAfter: %lu\n",this->id, this->total_move_ticks,this->accelerate_until,this->decelerate_after);
+     
     float inv = 1.0F / this->steps_event_count;
     for (uint8_t m = 0; m < n_actuators; m++) {
         uint32_t steps = this->steps[m];
         this->tick_info[m].steps_to_move = steps;
+        this->tick_info[m].acceleration_change=0;
         if(steps == 0) continue;
 
         float aratio = inv * steps;
         this->tick_info[m].steps_per_tick = STEPTICKER_TOFP((this->initial_rate * aratio) / STEP_TICKER_FREQUENCY); // steps/sec / tick frequency to get steps per tick in 2.30 fixed point
-        this->tick_info[m].counter = 0; // 2.30 fixed point
-        this->tick_info[m].step_count = 0;
         this->tick_info[m].next_accel_event = this->total_move_ticks + 1;
-
+       
         float acceleration_change = 0;
         if(this->accelerate_until != 0) { // If the next accel event is the end of accel
             this->tick_info[m].next_accel_event = this->accelerate_until;
@@ -323,8 +348,28 @@ void Block::prepare()
         }
 
         // convert to fixed point after scaling
+       
+       
         this->tick_info[m].acceleration_change= STEPTICKER_TOFP(acceleration_change * aratio);
         this->tick_info[m].deceleration_change= -STEPTICKER_TOFP(this->deceleration_per_tick * aratio);
         this->tick_info[m].plateau_rate= STEPTICKER_TOFP((this->maximum_rate * aratio) / STEP_TICKER_FREQUENCY);
+        
+        
+        /*        
+        
+        
+        THEKERNEL->streams->printf("    Axis: %d, Dir: %u, Steps: %lu, ACC: %li, DCC: %li, rate: %li, next: %lu\n", m,
+                                                     this->direction_bits[m] ? 1:0,
+                                                     steps,
+                                                     this->tick_info[m].acceleration_change,
+                                                     this->tick_info[m].deceleration_change,
+                                                     this->tick_info[m].plateau_rate,
+                                                     this->tick_info[m].next_accel_event);
+        THEKERNEL->streams->printf("     S/T: %li, aratio: %e\n",
+                                                     this->tick_info[m].steps_per_tick,
+                                                    aratio);
+                                               
+       */
     }
-}
+    }
+
